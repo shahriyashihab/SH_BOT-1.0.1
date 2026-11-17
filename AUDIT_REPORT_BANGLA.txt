@@ -1,0 +1,925 @@
+=====================================================================
+             সম্পূর্ণ কোড অডিট রিপোর্ট (A to Z)
+             Telegram Session Verification Bot
+=====================================================================
+
+তারিখ          : ২০২৬-১০-২০
+স্কোপ          : পুরো workspace — ২০১টি Python ফাইল, প্রায় ৬৩,০০০ লাইন
+পদ্ধতি         : প্রতিটি ফাইল, প্রতিটি লাইন পড়া হয়েছে (line-by-line)
+                 তারপর গুরুত্বপূর্ণ সমস্যাগুলো নিজে হাতে আবার যাচাই করা হয়েছে
+ভাষা           : বাংলা
+
+এই ডকুমেন্টে প্রতিটি সমস্যার জন্য তিনটি অংশ আছে:
+   (ক) সমস্যা কী        — ঠিক কোন লাইনে, কী লেখা আছে
+   (খ) কেন সমস্যা / ক্ষতি — কেন এটা ভুল, আর এর ফলে কী ক্ষতি হবে
+   (গ) সমাধান          — কী করতে হবে
+
+সূচিপত্র:
+   ভাগ ১  : CRITICAL / HIGH — অতি জরুরি (টাকা, নিরাপত্তা, ক্র্যাশ)
+   ভাগ ২  : MEDIUM — মাঝারি (ডেটা ইন্টিগ্রিটি, পারফরম্যান্স)
+   ভাগ ৩  : LOW — ছোট (মৃত কোড, পরিষ্কার-পরিচ্ছন্নতা)
+   ভাগ ৪  : লাইভ টেস্টের ফল
+   ভাগ ৫  : যেসব ফাইল পরিষ্কার
+   ভাগ ৬  : ঠিক করার অগ্রাধিকার তালিকা
+
+=====================================================================
+ভাগ ১ — CRITICAL / HIGH (অতি জরুরি)
+=====================================================================
+
+
+---------------------------------------------------------------------
+সমস্যা ১ : Withdrawal Approve/Reject-এ কোনো Admin চেক নেই
+---------------------------------------------------------------------
+ফাইল      : bot/handlers/channel_withdraw_callbacks.py
+লাইন      : 54, 75, 99, 119
+সিভিয়ারিটি : CRITICAL
+
+(ক) সমস্যা কী:
+    উইথড্র-রিপোর্ট চ্যানেলে "✅ Approve" এবং "❌ Reject" বাটন থাকে।
+    এই চারটি ক্যালব্যাক হ্যান্ডলারের উপরে শুধু লেখার প্যাটার্ন-ফিল্টার
+    বসানো: filters.regex(r"^ch_approve\|(.+)$") ইত্যাদি।
+    কিন্তু বারবার দেখা হচ্ছে না — "যে বাটনে চাপ দিচ্ছে সে অ্যাডমিন কি না"।
+    অর্থাৎ কোনো admin_filter নেই। লাইন 126-এ সরাসরি
+    approve_withdraw_request(tx_id) কল হয়; ওই ফাংশনের ভিতরেও কোনো
+    অ্যাডমিন যাচাই নেই।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    চ্যানেলের যেকোনো সদস্য (বা যার হাতে ওই বাটন পৌঁছায়) ক্যালব্যাক
+    পাঠিয়ে যেকোনো withdrawal approve করতে পারবে (মানে টাকা বের করে
+    দেবে) অথবা reject করতে পারবে (টাকা refund করে দেবে)।
+    এটা সরাসরি আর্থিক চুরি/লসের ঝুঁকি। সবচেয়ে বিপজ্জনক সমস্যা।
+
+(গ) সমাধান:
+    - প্রতিটি ক্যালব্যাক হ্যান্ডলারের উপরে admin_filter যোগ করা
+      (bot.handlers.admin.router এর admin_filter ব্যবহার করে)।
+    - approve_withdraw_request / reject_withdraw_request কল করার আগে
+      result-এর সাথে সাথে আবার যাচাই করা যে caller ADMIN_ID বা
+      admins তালিকায় আছে।
+    - চ্যানেলের বাটন ব্যবহারকারী কে — যাচাই করে log রাখা।
+
+
+---------------------------------------------------------------------
+সমস্যা ২ : Reject করার সময় Refund ক্র্যাশ — টাকা হারানোর ঝুঁকি
+---------------------------------------------------------------------
+ফাইল      : bot/data/withdrawals.py
+লাইন      : 485-590 (বিশেষ করে 528, 534, 539)
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    reject_withdraw_request() প্রথমে (লাইন 534) রিকোয়েস্টের
+    status = "rejected" করে দেয়। এরপর (লাইন 539)
+    current_balance + amount যোগ করে রিফান্ড করে।
+    কিন্তু amount বা current_balance যদি string হয়, তাহলে
+    "string + number" করতে গিয়ে Python TypeError ছুড়ে দেয়।
+    কোনো float() রূপান্তর নেই।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    status এমনিতেই "rejected" হয়ে গেছে, তারপর রিফান্ডের সময় crash।
+    ফলে ইউজারের withdrawal "rejected" দেখাবে কিন্তু টাকা ফেরতই আসবে না
+    — টাকা গায়েব (silent money loss)।
+
+(গ) সমাধান:
+    - refund-এর আগে amount = float(amount or 0) এবং
+      current_balance = float(current_balance or 0) করা।
+    - অথবা crash হলে স্ট্যাটাস না বদলানো — আগে রিফান্ড নিশ্চিত, পরে status।
+    - পুরো ব্লককে উপযুক্ত try/except দিয়ে ঘিরে ব্যর্থ হলে log + alert।
+
+
+---------------------------------------------------------------------
+সমস্যা ৩ : "Inconclusive" Spam চেকের Rate-সুরক্ষা পুরোপুরি মৃত কোড
+---------------------------------------------------------------------
+ফাইল      : bot/verification/twofa.py
+লাইন      : 620-627
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    কমেন্টে বলা হয়েছে — "যদি spam চেক অনিশ্চিত (inconclusive) হয়,
+    তাহলে আগের সেভ করা rate ধরে রাখব, যাতে ভালো অ্যাকাউন্টের দাম
+    কমে না যায়।" লাইন 621-এ সত্যিই দেশ = _stored_rate সেট করা হয়।
+    কিন্তু ঠিক পরের লাইন 627-এ আবার:
+        country_rate = get_country_rate(country_code, account_status, ...)
+    দিয়ে সেটা মুছে ফেলা হয়। অর্থাৎ সুরক্ষাটা লেখা হয়েছে, কিন্তু
+    পরের লাইনেই তা বাতিল।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    সুরক্ষা কোড থাকা সত্ত্বেও কাজ করে না (dead code)।
+    ফলে inconclusive check-এ একটি ভালো (spam-free) অ্যাকাউন্ট
+    spam ধরনের কম rate পেয়ে যাবে — ইউজার কম টাকা পাবে।
+
+(গ) সমাধান:
+    - লাইন 627-এর get_country_rate কলটি শুধু তখনই চালানো উচিত যখন
+      inconclusive নয় (else শাখায়)।
+    - inconclusive হলে 621-এ সেট করা _stored_rate টাই ব্যবহার করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ৪ : Legacy Recovery Device Check-এ NameError
+---------------------------------------------------------------------
+ফাইল      : bot/recovery/validity.py
+লাইন      : 466 (ফাংশন শুরু লাইন 371)
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    check_session_validity() ফাংশনের প্যারামিটার (লাইন 371):
+      session_string, api_id, api_hash, country_code, preferred_proxy_url
+    — এর মধ্যে "phone" নামের কোনো প্যারামিটার নেই।
+    কিন্তু ফাংশনের ভিতরে লাইন 466-এ:
+      invoke_with_timeout(temp_client, GetAuthorizations(),
+                          f"recovery-devices:{phone}")
+    — এখানে "phone" ব্যবহার করা হয়েছে।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    Python "phone" খুঁজে না পেয়ে NameError ছুড়ে দেয়।
+    লাইন 473-এর except Exception সেটা নীরবে গিলে ফেলে।
+    ফলে এই legacy পথে device_count কখনোই হিসাব হয় না,
+    has_extra_devices সবসময় False থাকে → মাল্টি-ডিভাইস অ্যাকাউন্ট
+    থাকলেও ধরা পড়ে না → ভুল সিদ্ধান্ত।
+
+(গ) সমাধান:
+    - হয় ফাংশনে phone: str = "UNKNOWN" প্যারামিটার যোগ করা,
+      নাহলে device_info-এর seed (session_string[:24]) ব্যবহার করা —
+      যেভাবে লাইন 395-এ করা হয়েছে।
+
+
+---------------------------------------------------------------------
+সমস্যা ৫ : Multi-device রিপোর্টে UnboundLocalError
+---------------------------------------------------------------------
+ফাইল      : bot/monitor/multi_device.py
+লাইন      : 379-392
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    লাইন 379-390-এ try ব্লকে:
+       sent = await report_pending_or_multidevice_safe(...)
+    লাইন 391-392-এর finally ব্লকে:
+       release_channel_report(session_id, sent=sent is not None)
+    কিন্তু finally সবসময় চলে। যদি report কলটি (লাইন 380)
+    exception দেয়, তাহলে sent অ্যাসাইনই হয় না, অথচ finally
+    তারপরও "sent" খুঁজতে যায়।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    UnboundLocalError ছুড়ে দেয়। ফলে চ্যানেল-রিপোর্টের ক্লেইম
+    ভুলভাবে রিলিজ হয় — ডুপ্লিকেট/ভুল রিপোর্ট যেতে পারে,
+    অথবা সেশন সঠিকভাবে ফাইনালাইজ না হয়ে ঝুলে থাকতে পারে।
+
+(গ) সমাধান:
+    - try ব্লকের আগেই sent = None দিয়ে ইনিশিয়ালাইজ করা।
+    - তারপর finally-তে sent is not None ব্যবহার করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ৬ : Graceful Shutdown-এ Monitor কখনো Cancel হয় না
+---------------------------------------------------------------------
+ফাইল      : bot/lifecycle/shutdown.py
+লাইন      : 7
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    লাইন 7-এ লেখা:
+       from bot.monitor.state import pending_monitor_task
+    এটা import-এর সময়ই ভেরিয়েবলের মান কপি করে নেয় — তখন সেটা None।
+    কিন্তু পরে bot/monitor/state.py-এর লাইন 32-এ monitor চালু করার
+    সময় নতুন task বসানো হয় (pending_monitor_task = create_task(...))।
+    shutdown.py-এর কপিটা তখনও পুরনো None।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    শাটডাউনের সময় লাইন 42-এ:
+       if pending_monitor_task and not pending_monitor_task.done():
+    — এই কন্ডিশন সবসময় মিথ্যা (কারণ পুরনো None)।
+    ফলে monitor task কখনো cancel হয় না; স্টোরেজ save/close হওয়ার
+    সময়ও monitor চলতে থাকে → ডেটা ছিন্নভিন্ন/করাপ্ট হওয়ার ঝুঁকি।
+
+(গ) সমাধান:
+    - from bot.monitor import state দিয়ে মডিউল ইমপোর্ট করা,
+      তারপর state.pending_monitor_task হিসেবে লাইভ মান পড়া।
+    - অথবা state.py-এ একটি get_pending_monitor_task() ফাংশন রেখে
+      shutdown থেকে সেটি কল করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ৭ : rate_limiter-এ নিজেই নিজের Lock আটকে যায় (Deadlock)
+---------------------------------------------------------------------
+ফাইল      : bot/utils/rate_limiter.py
+লাইন      : 259 এবং 282, সাথে 183
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    লাইন 259-এ: async with _in_memory_lock: — তালা ধরা হয়।
+    তারপর লাইন 282-এ: await is_user_blocked(int(user_id)) কল।
+    কিন্তু is_user_blocked (লাইন 183) আবার সেই একই
+    _in_memory_lock নিতে চায়।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    asyncio.Lock re-entrant নয় — যে task একবার ধরে আছে,
+    সে-ই আবার চাইলে চিরকাল অপেক্ষা করে (deadlock)।
+    ফলে ওই ফাংশন কল হলে বটের relevant অংশ hang করে।
+
+(গ) সমাধান:
+    - হয় is_user_blocked-এর একটি lock-মুক্ত internal ভার্সন
+      (_is_user_blocked_unlocked) কল করা,
+    - নাহলে তালা ধরে না রেখেই ব্লক-চেক করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ৮ : Country Capacity-তে "0 = unlimited" আসলে কাজ করে না
+---------------------------------------------------------------------
+ফাইল      : bot/data/countries.py
+লাইন      : 726 (কমেন্ট 719)
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    কমেন্ট (লাইন 719) বলছে capacity = 0 মানে "unlimited"।
+    কিন্তু লাইন 726-এ:
+       return int(country_data.get("capacity", DEFAULT_COUNTRY_CAPACITY)
+                  or DEFAULT_COUNTRY_CAPACITY)
+    Python-এ 0 falsy, তাই "0 or DEFAULT" হয়ে যায় ডিফল্ট মান।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    স্টোর করা 0 কখনোই 0 হিসেবে ফেরে না — সবসময় ডিফল্ট cap বসে।
+    কোনো দেশকে "unlimited" করা অসম্ভব হয়ে পড়ে; capacity সেটিং কাজ করে না।
+
+(গ) সমাধান:
+    - "or DEFAULT" অংশটা বাদ দেওয়া। স্টোর করা মান সরাসরি ফেরানো;
+      0 থাকলে 0-ই থাকবে।
+    - set_country_rate-এর সাথে সামঞ্জস্য রাখা (লাইন 752-এ 0 ব্যবহার হয়)।
+
+
+---------------------------------------------------------------------
+সমস্যা ৯ : api_rotation-এ লক নেই — রেস/ভুল rotation
+---------------------------------------------------------------------
+ফাইল      : bot/utils/api_rotation.py
+লাইন      : 94-111 (record_usage), 260-262 (get_current_api_info)
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    record_usage() কোনো lock না ধরেই sessions_today, success_count,
+    flood_count, cooldown_until বদলায়।
+    get_current_api_info() কোনো lock ছাড়াই self._current_index বদলায়।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    একই সময়ে দুই কাজ চললে একটার লেখা আরেকটা মুছে দিতে পারে
+    (lost update)। API-এর success/flood হিসাব ভুল হবে,
+    rotation ভুল API-তে চলে যাবে → Telegram FloodWait বাড়বে।
+
+(গ) সমাধান:
+    - record_usage এবং get_current_api_info-কে ম্যানেজারের
+      _lock-এর ভিতরে আনা।
+
+
+---------------------------------------------------------------------
+সমস্যা ১০ : TData তৈরি নীরবে ব্যর্থ হয় (কোনো fallback নেই)
+---------------------------------------------------------------------
+ফাইল      : bot/services/session_formats.py
+লাইন      : 909-914, 917, 934
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    _aes_ecb_block() (লাইন 909) সরাসরি "cryptography" লাইব্রেরি
+    import করে। লাইভ TData পথ (_aes_ige_encrypt লাইন 917,
+    _aes_ige_decrypt লাইন 934) এর উপর নির্ভরশীল।
+    requirements.txt-এর কমেন্ট দাবি করে "cryptography না থাকলেও
+    pure-Python fallback দিয়ে TData কাজ করবে" — কিন্তু IGE পথে
+    কোনো pure-Python fallback নেই (CBC fallback আছে, কিন্ত সেটা
+    ব্যবহৃতই হয় না)।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    যেসব মেশিনে (Termux/Android/Docker) cryptography ইনস্টল হবে না,
+    সেখানে TData ফাইল নীরবে তৈরি হবে না — স্পষ্ট error ছাড়াই।
+    কমেন্ট আর বাস্তবতা মেলে না।
+
+(গ) সমাধান:
+    - হয় IGE-এর জন্য pure-Python fallback লেখা,
+    - নাহলে cryptography না থাকলে স্পষ্ট exception ছুড়ে দেওয়া
+      যাতে ইউজার/অ্যাডমিন জানে TData ব্যর্থ হয়েছে।
+
+
+---------------------------------------------------------------------
+সমস্যা ১১ : i18n/translator Event Loop আটকে দেয় + asyncio.run ক্র্যাশ
+---------------------------------------------------------------------
+ফাইল      : bot/utils/i18n.py (লাইন 283-344)
+             bot/services/translator.py (লাইন 481-482, 78-86, 259)
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    i18n._lazy_translate_batch সরাসরি ব্লকিং requests দিয়ে নেটওয়ার্ক
+    কল করে (event loop-এর উপরেই)।
+    translator.backfill_existing_templates (লাইন 481) চলমান event
+    loop-এর ভিতর asyncio.run(...) ডাকে।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    ব্লকিং কল event loop-কে আটকে দেয় (সব কাজ থেমে যায়)।
+    আর চলমান loop-এর ভিতর asyncio.run ডাকলে Python
+    RuntimeError ছুড়ে দেয় — crash।
+    ফলে admin panel-এর অনুবাদ কাজ অস্থিতিশীল।
+
+(গ) সমাধান:
+    - ব্লকিং network/IO কলগুলো asyncio.to_thread দিয়ে চালানো।
+    - asyncio.run বাদ দিয়ে চলমান loop-এর সাথে await করা,
+      অথবা বাইরে থেকে await করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ১২ : Firebase খালি state কে সত্য ধরে ক্লাউড ডেটা মুছে ফেলতে পারে
+---------------------------------------------------------------------
+ফাইল      : bot/data/firebase_backend.py
+লাইন      : 157-160, 339-340
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    যদি হঠাৎ Firebase থেকে খালি response আসে (নেটওয়ার্ক সমস্যা,
+    সাময়িক ত্রুটি), কোড ধরে নেয় এটা নতুন খালি DB, এবং পরে পূর্ণ
+    sync-এ root-এ খালি map পাঠায় (firebase_sync_all)।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    Firebase-এ খালি map পাঠানো মানে "সব মুছে ফেলো"। ফলে ক্লাউড
+    এবং লোকাল ডেটাবেসের সমস্ত user node মুছে যেতে পারে — বড়
+    ডেটা-লস (cloud data loss path)।
+
+(গ) সমাধান:
+    - খালি response কে "সত্য" ধরার আগে পুনঃচেষ্টা/গ্রেস-টাইম দেওয়া।
+    - "সব মুছে ফেলা" অপারেশন কখনোই খালি in-memory state থেকে না
+      চালানো — যাচাই করে নেওয়া যে লোকাল state সত্যিই খালি।
+
+
+---------------------------------------------------------------------
+সমস্যা ১৩ : reconcile-এ অসীম বারবার Message পাঠানোর চেষ্টা
+---------------------------------------------------------------------
+ফাইল      : bot/recovery/reconcile.py
+লাইন      : 405-435
+সিভিয়ারিটি : HIGH (MEDIUM-এর উঁচু প্রান্ত)
+
+(ক) সমস্যা কী:
+    Message delivery ব্যর্থ হলেও কোড mark_session_message_sent(True)
+    বলে "হয়ে গেছে" মার্ক করে। কিন্তু পরে আবার reconcile_message_pending
+    True থাকায় আবার চেষ্টা করে — এই লুপের কোনো নির্দিষ্ট সীমা নেই।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    যদি ইউজার কখনোই message পেতে না পারে (account deactivated/blocked),
+    তাহলে প্রতি ঘণ্টায় অনন্তকাল retry চলবে — সম্পদ নষ্ট, log ভরে যাবে।
+
+(গ) সমাধান:
+    - একটি সর্বোচ্চ retry সীমা (যেমন ৫ বার) ঠিক করে তারপর
+      message_send pending বন্ধ/রিপোর্ট করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ১৪ : Monitor Full-Validation Finalization Claim না নিয়েই চলে
+---------------------------------------------------------------------
+ফাইল      : bot/monitor/validation.py
+লাইন      : 465-472
+সিভিয়ারিটি : HIGH
+
+(ক) সমস্যা কী:
+    যদি "fast path" আগেই finalization claim নিয়ে থাকে
+    (claimer == "monitor_fast_path"), তাহলে full validation
+    claim না নিয়েই সামনে এগিয়ে যায় এবং নিজেকে
+    "monitor_full_validation" হিসেবে mark করে।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    একই session-এর দুইটি finalizer একসাথে চলতে পারে → ডুপ্লিকেট
+    message/report হতে পারে; "pending" → "approved" approve-এ
+    race থেকে যায়।
+
+(গ) সমাধান:
+    - fast path claim ধরে থাকলে full validation থেমে যাওয়া উচিত;
+      ক্লেইম না নিয়ে এগোনো উচিত নয়।
+
+
+=====================================================================
+ভাগ ২ — MEDIUM (মাঝারি)
+=====================================================================
+
+
+---------------------------------------------------------------------
+সমস্যা ১৫ : _storage_lock ছাড়া Session/User লেখা (Data Race)
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/data/sessions.py        — 683-691, 722-724, 726, 752, 785, 832
+   bot/data/users.py           — 6-29
+   bot/data/withdrawals.py     — 324-336, 358-381, 596-621
+   bot/data/countries.py       — 61..349, 510, 356-369
+   bot/data/logs.py            — 12-21, 25
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    অনেক জায়গায় session/user/country ডেটা পড়া-লেখা হয় কিন্তু
+    _storage_lock তালা ধরা হয় না — অথচ অন্য জায়গায় একই ডেটা
+    তালা ধরে লেখা হয়। উদাহরণ: approve_pending_session,
+    reject_pending_session, expire_pending_session; get_user_info;
+    set_user_withdraw_config; get_next_country_photo (read-modify-write)।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    দুই কাজ একসাথে চললে একটা লিখে ফেলার আগেই আরেকটা পুরনো মান
+    নিয়ে ফেলে — update হারিয়ে যায় (lost update)। আবার iter করা
+    অবস্থায় বদল হলে "dictionary changed size during iteration"
+    এরর, শ্যালো-কপির মাধ্যমে shared mutable reference ফাঁস,
+    TOCTOU-জনিত KeyError ইত্যাদি।
+
+(গ) সমাধান:
+    - সমস্ত _storage পঠন/লেখা একই _storage_lock-এর ভিতরে আনা।
+    - কপি ফেরানোর সময় গভীর (deep) কপি ব্যবহার করা।
+    - approve/reject/expire-এর পুরো read-modify-write একসাথে lock করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ১৬ : Blocking I/O Async পথে (Event Loop আটকে যায়)
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/verification/otp.py     — 487-575 (os.makedirs, generate_pyrogram_file, JSON write)
+   bot/handlers/account.py      — 34
+   bot/handlers/admin/dashboard.py — 117-131, 134-143, 556-577
+   bot/services/translator.py   — 78-86, 259 (blocking requests + time.sleep)
+   bot/utils/high_scale_storage.py — 172-211
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    ফাইল পড়া/লেখা, DB query, নেটওয়ার্ক কল — এগুলো async handler-এর
+    ভিতরে সরাসরি (synchronous) চলে; asyncio.to_thread ব্যবহার হয় না।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    এই ভারী কাজগুলো একই event loop-কে আটকে রাখে। এক request
+    process হওয়ার সময় বটের বাকি সব কাজ থেমে থাকে — ধীরগতি,
+    timeout, "bot হ্যাং" অনুভূতি।
+
+(গ) সমাধান:
+    - ভারী synchronous কাজ asyncio.to_thread(...)-এ পাঠানো।
+    - অপেক্ষাকৃত কম ভারী পড়া caching (fast_cache) দিয়ে করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ১৭ : টাকা সব জায়গায় float দিয়ে হিসাব
+---------------------------------------------------------------------
+ফাইল      : bot/utils/database.py (REAL কলাম)
+             bot/services/accounting.py
+             bot/data/users.py
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    সব টাকার হিসাব Python float দিয়ে, আর SQLite-এ REAL কলামে সেভ।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    float সঠিক দশমিক সংখ্যা ধরে রাখতে পারে না (0.1 + 0.2 != 0.3)।
+    হাজারো লেনদেনের পর ব্যালেন্সে ছোট ছোট রাউন্ডিং ভুল জমে
+    মিল-অমিল সৃষ্টি করবে।
+
+(গ) সমাধান:
+    - টাকা সেন্ট/পয়সা হিসেবে integer-এ রাখা, অথবা Python Decimal ব্যবহার।
+    - نمایشের সময় শুধু দশমিক ফরম্যাট করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ১৮ : সিক্রেট/প্রাইভেসি ঘাটতি
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/services/reports.py       — 434-437 (plaintext JSON + path traversal)
+   bot/services/session_io.py    — 376 (phone.replace("+","") — path sanitize নেই)
+   bot/utils/database.py         — 90-103 (encryption fail → silent plaintext)
+   bot/services/session_formats.py — 1046-1068 (_SLOT_KEYS-এ foreign key)
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    - reports.py session JSON plaintext-এ ডিস্কে লেখে ও ইউজারকে দেয়।
+    - phone.replace("+","") দিয়ে ফাইলনাম বানানো হয়, কিন্তু "/" বা ".."
+      সরানো হয় না → path traversal-এর সুযোগ।
+    - database.py-তে এনক্রিপশন ব্যর্থ হলে নীরবে plaintext সেভ হয়।
+    - session_formats.py-তে _SLOT_KEYS-এ বাইরের একটা অ্যাকাউন্টের
+      আসল auth key বসানো আছে।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    Session string/token ফাঁস, অন্যের ক্রেডেনশিয়াল নিজের ফাইলে
+    ঢুকে যাওয়া, ডিস্কে সংবেদনশীল ডেটা unprotected থাকা।
+
+(গ) সমাধান:
+    - JSON এনক্রিপ্ট করে রাখা (Fernet), অথবা শুধু মেমরিতে রাখা।
+    - ফাইলনাম sanitize করা (শুধু ডিজিট রেখে)।
+    - এনক্রিপশন ব্যর্থ হলে জোরে error ছুড়ে দেওয়া (silent না)।
+    - _SLOT_KEYS থেকে বাইরের real key সরিয়ে dummy/সঠিক মান ব্যবহার।
+
+
+---------------------------------------------------------------------
+সমস্যা ১৯ : মেমরিতে সীমানা ছাড়া ডেটা জমে যাওয়া (Memory Leak)
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/utils/anti_spam.py        — 136-142 (_user_activity), 258-261 (_country_activity)
+   bot/middleware/channel_guard.py — 28-29 (_prompt_cooldown)
+   bot/verification/otp.py        — 34 (_otp_wrong_attempts)
+   bot/services/session_reporting.py — 75 (_delivered_ok)
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    এসব dict প্রতিটি user/session-এর জন্য বাড়ে কিন্তু কোনো
+    সর্বোচ্চ সীমা (cap) বা নিয়মিত cleanup নেই।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    অনেক user হলে RAM ধীরে ধীরে ভরে যায় → বট slow/hang/crash।
+
+(গ) সমাধান:
+    - প্রতিটি dict-এ একটি সর্বোচ্চ সীমা রাখা (যেমন 50,000 entry) এবং
+      পুরনো entry স্বয়ংক্রিয়ভাবে সরানো।
+    - মেমরি-manager-এর periodic cleanup-এ এসব نیز যোগ করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ২০ : Authorization "Fail-Open" (চেক ব্যর্থ হলে ঢুকে যেতে দেয়)
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/handlers/language.py        — 83-89
+   bot/middleware/channel_guard.py — 370-375
+   bot/handlers/admin/router.py    — 104-112
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    - language.py: চ্যানেল membership চেক fail হলে exception গিলে
+      ফেলে welcome message দিয়ে দেয়।
+    - channel_guard.py:370-375: রর দিলে ১২০ সেকেন্ডের জন্য
+      is_member=True ক্যাশ করে (সবাইকে ঢুকতে দেয়)।
+    - router.py:104-112: admins তালিকা string vs int মিশ্রিত হলে
+      "in admins" যাচাই ভুল হয়ে admin যাচাই ভেঙে যেতে পারে।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    চ্যানেলে জয়েন না করা user-ও ঢুকে যাবে; অ্যাডমিন যাচাই
+    ভেঙে যেতে পারে (গুরুত্বপূর্ণ নিরাপত্তা দুর্বলতা)।
+
+(গ) সমাধান:
+    - চেক ব্যর্থ হলে ঢুকতে না দেওয়া (fail-closed)।
+    - সবসময় admin ID-গুলো int হিসেবে তুলনা করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ২১ : খারাপ env/ডেটার কারণে Import-Time Crash
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/monitor/orchestrator.py     — 49 (MISSING_DATA_GRACE_HOURS)
+   bot/verification/state.py        — 40, 78 (int(os.getenv(...)))
+   bot/monitor/stuck_recovery.py    — 326 (fromisoformat, Z-strip নেই)
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    - MISSING_DATA_GRACE_HOURS খালি/অক্ষর হলে float() → ValueError।
+    - int(os.getenv(...)) — অশুদ্ধ মানে মডিউল import-ই ক্র্যাশ।
+    - stuck_recovery-এ ISO তারিখের শেষে "Z" বা "+00:00" থাকলে
+      fromisoformat ব্যর্থ।
+
+(খ) কেন সমস্যা / ক্ষতি:
+   環境 ভুল হলে পুরো মডিউল লোডই হবে না → বট চালু হবে না।
+    তারিখ-আকারে Z থাকলে determination চুপচাপ skip হবে।
+
+(গ) সমাধান:
+    - try/except দিয়ে নিরাপদ পার্সিং, ডিফল্ট মান ব্যবহার।
+    - fromisoformat-এর আগে .replace("Z","").replace("+00:00","")।
+
+
+---------------------------------------------------------------------
+সমস্যা ২২ : Admin-এর ইনপুট যাচাই ছাড়াই সেভ
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/handlers/admin/countries.py   — 1208-1215 (import_country_config)
+   bot/handlers/admin/router.py      — 720-731 (timezone offset)
+   bot/handlers/admin/core_config.py — 1103 (capacity)
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    Import করা country config-এ rate গুলো numeric/sign/hierarchy
+    যাচাই ছাড়া সেভ হয়; timezone offset unbounded; capacity-এর
+    উপরের সীমা নেই।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    ঋণাত্মক/ভুল rate, অস্বাভাবিক capacity — সিস্টেমের আচরণ
+    বিগড়ে যেতে পারে।
+
+(গ) সমাধান:
+    - সেভ করার আগে সব মান যাচাই (positive range, hierarchy clamp)।
+    - set_country_rates-এর validate পথ ব্যবহার করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ২৩ : Async-এর ভিতরে threading.Lock ব্যবহার
+---------------------------------------------------------------------
+ফাইল      : bot/handlers/withdraw.py
+লাইন      : 22, 196, 215, 291
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    withdraw_lock নামে একটা threading.RLock async handler-এর ভিতরে ধরা হয়।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    বর্তমানে ভিতরে await না থাকলেও, ভবিষ্যতে কোনো await যোগ হলে
+    event loop চিরতরে আটকে যাবে (deadlock)। ভঙ্গুর ডিজাইন।
+
+(গ) সমাধান:
+    - asyncio.Lock ব্যবহার করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ২৪ : channel_guard-এ ভুল/অনিরাপদ Identity
+---------------------------------------------------------------------
+ফাইল      : bot/middleware/channel_guard.py
+লাইন      : 508, 494
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    - লাইন 508: CallbackQuery-এর update.from_user.id None-guard ছাড়া।
+    - লাইন 494: message-এ user identity হিসেবে update.chat.id ব্যবহার
+      (গ্রুপে এটা গ্রুপের ID, ইউজারের নয়)।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    from_user None হলে AttributeError; গ্রুপে ভুল identity-তে
+    membership যাচাই → চেক নিজর্ধায়িত/ভুল ফল।
+
+(গ) সমাধান:
+    - সব ইনপুটে from_user None-guard।
+    - সর্বদা user ID ব্যবহার (chat.id নয়)।
+
+
+---------------------------------------------------------------------
+সমস্যা ২৫ : Reject-এ (monitor) Rejected রিপোর্ট Claim ছাড়া পোস্ট
+---------------------------------------------------------------------
+ফাইল      : bot/monitor/rejector.py
+লাইন      : 113
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    rejector.py:113 send_report_to_channel(...) কল করে কিন্তু
+    try_claim_rejected_report(...) ব্যবহার করে না
+    (reconcile.py:530 করে)।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    দুটি পথ (rejector + reconcile) একই সেশনের জন্য rejected
+    রিপোর্ট দুবার পোস্ট করতে পারে।
+
+(গ) সমাধান:
+    - rejector-এও try_claim_rejected_report দিয়ে claim নেওয়া।
+
+
+---------------------------------------------------------------------
+সমস্যা ২৬ : Bare except (Exception-এর চেয়েও প্রশস্ত)
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/data/withdrawals.py     — 379
+   bot/recovery/worker.py      — 1052
+   bot/recovery/validity.py    — 157, 334, 368, 434, 482, 488, 518, 519
+সিভিয়ারিটি : MEDIUM
+
+(ক) সমস্যা কী:
+    শুধু "except:" (bare) ব্যবহার — এটা KeyboardInterrupt,
+    SystemExit ইত্যাদিও গিলে ফেলে।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    বট বন্ধ করার singnal (Ctrl+C/SystemExit) না ধরা; আসল
+    programming error nীরবে গিলে ফেলা।
+
+(গ) সমাধান:
+    - "except Exception:" অথবা নির্দিষ্ট exception টাইপ ব্যবহার করা।
+
+
+---------------------------------------------------------------------
+সমস্যা ২৭ : firebase_backend-এ top-level key override
+---------------------------------------------------------------------
+ফাইল      : bot/data/firebase_backend.py
+লাইন      : 213-216
+সিভিয়ারিটি : LOW-MEDIUM
+
+(ক) সমস্যা কী:
+    top-level key (admin_logs, withdraw_sessions) settings-এর মানের
+    উপর unconditional কপি করা হয়।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    পুরনো (stale) top-level node নতুন settings মানকে চাপা দিতে পারে।
+
+(গ) সমাধান:
+    - merge করার সময় সবচেয়ে নতুন timestamp-এর মান গ্রহণ করা।
+
+
+=====================================================================
+ভাগ ৩ — LOW (ছোট সমস্যা / পরিষ্কার-পরিচ্ছন্নতা)
+=====================================================================
+
+
+---------------------------------------------------------------------
+সমস্যা ২৮ : মৃত কোড (কেউ ডাকে না)
+---------------------------------------------------------------------
+ফাইল/লাইন :
+   bot/monitor/expiry.py            — পুরো ফাইল (কোথাও import নেই)
+   bot/recovery/notify.py           — no-op + অব্যবহৃত import
+   bot/services/session_formats.py  — _pad16 (387), _aes_cbc_encrypt (528),
+                                      _aes_cbc_encrypt_nopad (547),
+                                      _write_tdf_data (567) — কেউ ডাকে না
+   bot/verification/device.py       — 453 (recheck_devices_at_deadline)
+   bot/verification/telethon_export.py — 387 (pyrogram_to_telethon)
+   bot/handlers/admin/core_config.py— 279-294 (_cc_details_view_build)
+সিভিয়ারিটি : LOW
+
+(ক) সমস্যা কী / ক্ষতি:
+    এগুলো কেউ কল করে না। সরাসরি ক্ষতি নেই, কিন্তু কোড বোঝা
+    কঠিন হয়, রক্ষণাবেক্ষণে বিভ্রান্তি।
+
+(গ) সমাধান:
+    - নিশ্চিত হয়ে সরানো, অথবা "backward-compat" হলে মন্তব্য দিয়ে রাখা।
+
+
+---------------------------------------------------------------------
+সমস্যা ২৯ : অব্যবহৃত Import
+---------------------------------------------------------------------
+ফাইল/লাইন (উদাহরণ):
+   bot/handlers/start.py:3          — asyncio
+   bot/handlers/account.py:5        — asyncio
+   bot/handlers/language.py:10      — asyncio
+   bot/handlers/support.py:4        — ADMIN_ID
+   bot/handlers/debug.py:3          — logging
+   bot/handlers/monitor_hooks.py:3  — logging
+   bot/handlers/admin/router.py:51  — SESSION_2FA_PASSWORD, os, json, sqlite3
+   bot/handlers/admin/dashboard.py:3-11 — os, json, sqlite3, dataclass, etc.
+   bot/handlers/admin/menu.py:3-6   — os, json
+   bot/recovery/worker.py:49-50     — একই import দুইবার
+   bot/monitor/proxy_watchdog.py:154 — probe_proxy
+সিভিয়ারিটি : LOW
+
+(ক) সমস্যা কী / ক্ষতি:
+    কাজে ক্ষতি নেই, শুধু कोड পরিষ্কার নয়।
+
+(গ) সমাধান:
+    - অব্যবহৃত import সরানো।
+
+
+---------------------------------------------------------------------
+সমস্যা ৩০ : Debug হ্যান্ডলার প্রোডাকশনে চালু
+---------------------------------------------------------------------
+ফাইল      : bot/handlers/debug.py
+লাইন      : 13
+সিভিয়ারিটি : LOW-MEDIUM
+
+(ক) সমস্যা কী:
+    @app.on_message(group=-1000) — প্রতিটি চ্যাটের প্রতিটি মেসেজে
+    চলে এবং মেসেজের অংশ stdout-এ print করে।
+
+(খ) কেন সমস্যা / ক্ষতি:
+    Log ভরে যায়, user-এর লেখা (সম্ভাব্য সংবেদনশীল) আউটপুটে যায়,
+    performance সামান্য কমে।
+
+(গ) সমাধান:
+    - প্রোডাকশনে disable করা বা DEBUG মোডে শুধু চালু রাখা।
+
+
+---------------------------------------------------------------------
+সমস্যা ৩১ : ছোটখাটো অন্যান্য
+---------------------------------------------------------------------
+(ক) bot/data/settings.py
+    is_spam_check_enabled/is_two_factor_enabled ইত্যাদি bool() coerce
+    করে না; স্টোর করা non-boolean মান সরাসরি ফেরে।
+    সমাধান: return bool(_storage.get(key, True))।
+
+(খ) bot/data/countries.py (672-674)
+    get_country_rates raw মান validate ছাড়া দেয় (get_country_rate করে)।
+    সমাধান: একই validate_rate প্রয়োগ করা।
+
+(গ) bot/utils/redis_cache.py (391-393)
+    ত্রুটি হলেও {"available": True, "error": ...} রিপোর্ট করে — ভুল তথ্য।
+    সমাধান: ত্রুটিতে available: False ফেরানো।
+
+(ঘ) bot/utils/memory_manager.py (285)
+    Redis-এ KEYS ব্যবহার (blocking, অকার্জকরি)।
+    সমাধান: scan_iter ব্যবহার করা।
+
+(ঙ) bot/data/state.py (846, 889)
+    except (ValueError, TypeError, Exception) — Exception আগের দুটোকে ঢাকে।
+    সমাধান: শুধু Exception বা নির্দিষ্ট টাইপ রাখা।
+
+(চ) bot/data/__init__.py (__getattr__, __all__)
+    __all__ ম্যানুয়ালি ডুপ্লিকেট — কিছু re-export বাদ পড়েছে; typo থাকলে
+    বিভ্রান্তিকর AttributeError।
+    সমাধান: __all__ স্বয়ংক্রিয়ভাবে জেনারেট করা।
+
+(ছ) bot/data/templates.py (30, 64)
+    legacy flat string-এ "in" substring-টেস্ট; 겹치는 মানে ভুল source।
+    সমাধান: টাইপ যাচাই করা।
+
+(ঠ) bot/utils/proxy_probe.py (106-119)
+    SOCKS5-এ target ব্যর্থ হলে একই socket-এ পরের target — stream
+    desync।
+    সমাধান: প্রতিটি target-এর জন্য নতুন connection।
+
+(ড) bot/utils/rate_limiter.py (147-150)
+    off-by-one: (°per_minute+1)-তম request ব্লক; retry_after এক সেকেন্ড বেশি।
+    সমাধান: সীমানা সমন্বয়।
+
+(ঢ) bot/utils/database.py (790-823)
+    batch_upsert_users প্রতি user-এ আলাদা commit — mid-loop ব্যর্থতায়
+    আংশিক batch কমিট, rollback নেই।
+    সমাধান: এক transaction-এ সব, ব্যর্থতায় rollback।
+
+(ণ) bot/utils/database.py (530-590)
+    update_session_analytics/record_session_analytics idempotent নয়
+    — retry-এ একই session দুইবার।
+    সমাধান: session_id-এ dedupe key।
+
+(ত) bot/services/accounting.py + notifications.py (76 / 104)
+    একই session-এর জন্য দুই জায়গা থেকে transaction_logs লেখা →
+    ডুপ্লিকেট row।
+    সমাধান: একটি কেন্দ্রীয় লগিং path।
+
+
+=====================================================================
+ভাগ ৪ — লাইভ টেস্টের ফল (pytest)
+=====================================================================
+
+মোট টেস্ট       : 226টি collect হয়
+পুরো suite চালালে : ঝুলে যায় (কিছু টেস্ট নেটওয়ার্ক/Telegram-এ আটকে থাকে)
+
+টাকা/উইথড্র-সংক্রান্ত ৯৫টি টেস্টের মধ্যে ৩টি ফেল:
+   ১) tests/test_fix_h_f6_withdraw_atomic.py::test_success_creates_both
+      → result["request_id"] এখন "S3EB667HFX7KA", কিন্তু টেস্ট আশা
+        করে "w" দিয়ে শুরু। (withdrawals.py:43 এখন 13-char uppercase
+        tx id; _make_request_id legacy)
+   ২) tests/test_fix_e4_withdraw_race.py::test_approval_survives_simulated_restart
+   ৩) tests/test_fix_h_f6_withdraw_atomic.py::test_both_survive_simulated_restart
+      → restart-এর পর pending request খুঁজে পাওয়া যায় না।
+
+⚠️ গুরুত্বপূর্ণ সতর্কতা:
+   pytest টেস্ট ফাইল লোড করছে
+     C:\Users\SHAHRIYAR\Videos\New folder\workspace\tests\
+   কিন্তু bot কোড লোড হচ্ছে
+     C:\Users\SHAHRIYAR\Documents\workspace\bot\
+   — অর্থাৎ দুইটা আলাদা কপি। তাই এই ৩টি ফেল টেস্ট-সেটআপের
+   সমস্যাও হতে পারে, শুধু product bug নাও হতে পারে।
+   নিশ্চিত হতে একই ফোল্ডার থেকে টেস্ট চালানো দরকার।
+
+   নির্দেশ: শুধু C:\Users\SHAHRIYAR\Documents\workspace থেকে
+   python -m pytest tests/ চালান; "Videos\New folder\workspace"
+   কপিটা সরান/সিংক করুন।
+
+
+=====================================================================
+ভাগ ৫ — যেসব ফাইল পুরো পরিষ্কার পাওয়া গেছে (কোনো সমস্যা নেই)
+=====================================================================
+
+bot/core/context.py
+bot/core/parsers.py
+bot/core/pending.py
+bot/bootstrap/client.py
+bot/bootstrap/registration.py
+bot/middleware/__init__.py
+bot/lifecycle/__init__.py
+bot/lifecycle/cleanup.py
+bot/lifecycle/channel_check.py
+bot/lifecycle/daily_report.py
+bot/monitor/device_check.py
+bot/monitor/fast_path.py
+bot/monitor/recovery_scan.py
+bot/monitor/state.py
+bot/monitor/auto_logout.py
+bot/monitor/deadline_timer.py
+bot/recovery/constants.py
+bot/recovery/cleanup.py
+bot/recovery/run.py
+bot/handlers/admin/design.py
+bot/handlers/channel/cache.py
+bot/handlers/channel/forward.py
+bot/handlers/commands/* (account.py, cancel.py, start.py, withdraw.py)
+bot/utils/__init__.py
+bot/utils/net_timeouts.py
+bot/utils/bg_tasks.py
+bot/utils/text.py
+bot/utils/pending_recovery.py
+bot/utils/session_handler.py
+bot/utils/country_data.py
+bot/utils/country_codes.py
+bot/utils/device_generator.py
+bot/utils/logger.py
+bot/services/country_profile.py
+bot/data/languages.py
+
+
+=====================================================================
+ভাগ ৬ — ঠিক করার অগ্রাধিকার তালিকা (ক্রম অনুসারে)
+=====================================================================
+
+ক্রম | সমস্যা                                | ফাইল (লাইন)
+-----|--------------------------------------|------------------------------------------
+ ১   | চ্যানেল approve/reject-এ admin চেক   | channel_withdraw_callbacks.py:54,75,99,119
+ ২   | Reject-এ refund ক্র্যাশ               | withdrawals.py:485-590
+ ৩   | inconclusive rate overwrite           | twofa.py:627
+ ৪   | Monitor shutdown binding              | shutdown.py:7
+ ৫   | Multi-device UnboundLocalError        | multi_device.py:379-392
+ ৬   | rate_limiter deadlock                 | rate_limiter.py:259-282
+ ৭   | capacity "or DEFAULT"                 | countries.py:726
+ ৮   | validity.py phone NameError           | recovery/validity.py:466
+ ৯   | সেশন লেখায় _storage_lock              | sessions.py:726,752,785 ইত্যাদি
+১০   | Firebase খালি-state guard            | firebase_backend.py:157,339
+১১   | TData cryptography fallback          | session_formats.py:909-914
+১২   | i18n/translator blocking+asyncio.run | i18n.py:283-344, translator.py:481
+১৩   | reconcile unbounded retry            | reconcile.py:405-435
+১৪   | validation finalization claim        | validation.py:465-472
+
+সাरांश:
+   সরাসরি টাকার ঝুঁকি         : সমস্যা ১, ২, ৭, ১৫, ১৭, ১৮
+   সিস্টেম ভেঙে পড়ার ঝুঁকি    : সমস্যা ৩, ৪, ৫, ৬, ৮, ১১, ২১, ২৩
+   নীরব ডেটা-লস / লিক         : সমস্যা ৯, ১০, ১২, ১৩, ১৬, ১৯, ২০, ২২
+
+=====================================================================
+                           রিপোর্ট শেষ
+=====================================================================
+এই রিপোর্টটি replication-প্রমাণসহ: সমস্ত HIGH/CRITICAL দাবি নিজে হাতে
+লাইন-by-লাইন যাচাই করা হয়েছে। বাকি MEDIUM/LOW ফাইল-লাইন প্রমাণসহ
+একত্রিত করা হয়েছে।
+পরে analysis করে বলবেন কোনটা আগে ঠিক করতে চান।
+=====================================================================
